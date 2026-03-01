@@ -38,25 +38,3 @@ def download(filepath):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-```
-
----
-
-## **Step 2: Create requirements.txt**
-```
-flask
-```
-
----
-
-## **Step 3: Deploy to Railway**
-
-1. Go to [railway.app](https://railway.app) and sign in with GitHub
-2. Click **New Project → Deploy from GitHub repo**
-3. Upload your `server.py` and `requirements.txt` to a GitHub repo
-4. Select that repo on Railway
-5. Railway will auto-detect Flask and deploy it
-6. Go to **Settings → Networking → Generate Domain**
-7. Copy your domain, it looks like:
-```
-https://your-app.up.railway.app
