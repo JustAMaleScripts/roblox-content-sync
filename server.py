@@ -1,16 +1,17 @@
 from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
 import os
 
 app = Flask(__name__)
+CORS(app)  # This fixes the browser blocking issue
+
 UPLOAD_FOLDER = "files"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Upload a file
 @app.route("/upload", methods=["POST"])
 def upload():
     if "file" not in request.files:
         return jsonify({"error": "No file"}), 400
-
     f = request.files["file"]
     rel_path = request.form.get("path", f.filename)
     save_path = os.path.join(UPLOAD_FOLDER, rel_path)
@@ -19,7 +20,6 @@ def upload():
     print(f"[UPLOADED] {rel_path}")
     return jsonify({"success": True, "path": rel_path})
 
-# List all files
 @app.route("/files", methods=["GET"])
 def list_files():
     file_list = []
@@ -30,7 +30,6 @@ def list_files():
             file_list.append(rel)
     return jsonify(file_list)
 
-# Download a file
 @app.route("/download/<path:filepath>", methods=["GET"])
 def download(filepath):
     return send_from_directory(UPLOAD_FOLDER, filepath)
