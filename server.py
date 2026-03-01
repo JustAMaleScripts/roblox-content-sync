@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_from_directory, Response
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from PIL import Image
 import os
@@ -13,33 +13,7 @@ CORS(app)
 UPLOAD_FOLDER = "files"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ── PNG to raw RGBA converter ────────────────────────
-
-def png_to_rgba(data):
-    try:
-        img = Image.open(io.BytesIO(data)).convert("RGBA")
-        width, height = img.size
-        raw_pixels = list(img.getdata())
-
-        # Flatten to [r,g,b,a, r,g,b,a, ...]
-        flat = []
-        for r, g, b, a in raw_pixels:
-            flat.extend([r, g, b, a])
-
-        # Encode as base64 so Luau can read it
-        raw_bytes = bytes(flat)
-        b64 = base64.b64encode(raw_bytes).decode("utf-8")
-
-        return {
-            "width": width,
-            "height": height,
-            "data": b64
-        }
-    except Exception as e:
-        print(f"[PNG ERROR] {e}")
-        return None
-
-# ── Roblox .mesh to .obj converter ──────────────────
+# ── Mesh Parser ──────────────────────────────────────
 
 def parse_mesh_v1(data):
     lines = data.decode("utf-8").splitlines()
@@ -79,9 +53,9 @@ def parse_mesh_v2(data):
         header_end = data.index(b"\n") + 1
         offset = header_end
         sizeof_mesh_header = struct.unpack_from("<H", data, offset)[0]; offset += 2
-        num_lods = struct.unpack_from("<H", data, offset)[0]; offset += 2
-        num_verts = struct.unpack_from("<I", data, offset)[0]; offset += 4
-        num_faces = struct.unpack_from("<I", data, offset)[0]; offset += 4
+        num_lods           = struct.unpack_from("<H", data, offset)[0]; offset += 2
+        num_verts          = struct.unpack_from("<I", data, offset)[0]; offset += 4
+        num_faces          = struct.unpack_from("<I", data, offset)[0]; offset += 4
         offset = header_end + sizeof_mesh_header
         vertices = []
         uvs = []
@@ -131,6 +105,20 @@ def mesh_to_obj(data):
             obj_lines.append(f"f {f[0]} {f[1]} {f[2]}")
     return "\n".join(obj_lines)
 
+
+def png_to_rgba(data):
+    try:
+        img = Image.open(io.BytesIO(data)).convert("RGBA")
+        width, height = img.size
+        flat = []
+        for r, g, b, a in img.getdata():
+            flat.extend([r, g, b, a])
+        b64 = base64.b64encode(bytes(flat)).decode("utf-8")
+        return {"width": width, "height": height, "data": b64}
+    except Exception as e:
+        print(f"[PNG ERROR] {e}")
+        return None
+
 # ── Routes ───────────────────────────────────────────
 
 @app.route("/upload", methods=["POST"])
@@ -140,34 +128,29 @@ def upload():
     f = request.files["file"]
     rel_path = request.form.get("path", f.filename)
     data = f.read()
-
-    # Convert .mesh → .obj
-    if rel_path.endswith(".mesh"):
-        obj_data = mesh_to_obj(data)
-        if obj_data:
-            rel_path = rel_path.replace(".mesh", ".obj")
-            data = obj_data.encode("utf-8")
-            print(f"[CONVERTED] .mesh → {rel_path}")
-
-    # Convert .png → .rgba.json (raw pixel data)
-    elif rel_path.endswith(".png") or rel_path.endswith(".jpg") or rel_path.endswith(".jpeg"):
-        rgba = png_to_rgba(data)
-        if rgba:
-            rel_path = rel_path.rsplit(".", 1)[0] + ".rgba.json"
-            data = json.dumps(rgba).encode("utf-8")
-            print(f"[CONVERTED] image → {rel_path}")
-
-    # Skip .mp3 files entirely
-    elif rel_path.endswith(".mp3") or rel_path.endswith(".ogg") or rel_path.endswith(".wav"):
-        print(f"[SKIPPED] audio not supported: {rel_path}")
-        return jsonify({"error": "Audio files not supported"}), 400
-
-    save_path = os.path.join(UPLOAD_FOLDER, rel_path)
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    with open(save_path, "wb") as out:
-        out.write(data)
-    print(f"[UPLOADED] {rel_path}")
+    rel_path, data = process_file(rel_path, data)
+    if rel_path is None:
+        return jsonify({"error": "Unsupported file type"}), 400
+    save(rel_path, data)
     return jsonify({"success": True, "path": rel_path})
+
+
+@app.route("/upload-raw", methods=["POST"])
+def upload_raw():
+    body = request.get_json()
+    if not body or "name" not in body or "data" not in body:
+        return jsonify({"error": "Missing name or data"}), 400
+    name = body["name"]
+    # Decode from latin-1 safe encoding
+    try:
+        data = body["data"].encode("latin-1")
+    except:
+        data = body["data"].encode("utf-8")
+    name, data = process_file(name, data)
+    if name is None:
+        return jsonify({"error": "Unsupported"}), 400
+    save(name, data)
+    return jsonify({"success": True, "path": name})
 
 
 @app.route("/files", methods=["GET"])
@@ -184,6 +167,51 @@ def list_files():
 @app.route("/download/<path:filepath>", methods=["GET"])
 def download(filepath):
     return send_from_directory(UPLOAD_FOLDER, filepath)
+
+
+@app.route("/delete/<path:filepath>", methods=["DELETE"])
+def delete(filepath):
+    full = os.path.join(UPLOAD_FOLDER, filepath)
+    if os.path.exists(full):
+        os.remove(full)
+        return jsonify({"success": True})
+    return jsonify({"error": "Not found"}), 404
+
+
+@app.route("/clear", methods=["POST"])
+def clear():
+    for root, dirs, files in os.walk(UPLOAD_FOLDER):
+        for fname in files:
+            os.remove(os.path.join(root, fname))
+    return jsonify({"success": True})
+
+# ── Helpers ───────────────────────────────────────────
+
+def process_file(rel_path, data):
+    if rel_path.endswith(".mesh"):
+        obj_data = mesh_to_obj(data)
+        if obj_data:
+            rel_path = rel_path.replace(".mesh", ".obj")
+            data = obj_data.encode("utf-8")
+            print(f"[CONVERTED] .mesh → {rel_path}")
+    elif rel_path.endswith((".png", ".jpg", ".jpeg")):
+        rgba = png_to_rgba(data)
+        if rgba:
+            rel_path = rel_path.rsplit(".", 1)[0] + ".rgba.json"
+            data = json.dumps(rgba).encode("utf-8")
+            print(f"[CONVERTED] image → {rel_path}")
+    elif rel_path.endswith((".mp3", ".ogg", ".wav")):
+        print(f"[SKIPPED] audio: {rel_path}")
+        return None, None
+    return rel_path, data
+
+
+def save(rel_path, data):
+    save_path = os.path.join(UPLOAD_FOLDER, rel_path)
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    with open(save_path, "wb") as f:
+        f.write(data)
+    print(f"[SAVED] {rel_path}")
 
 
 if __name__ == "__main__":
